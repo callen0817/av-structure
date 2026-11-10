@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging / PyInstaller
+build/
+dist/
+*.egg-info/
+
+# Virtual Environments
+.venv/
+.venv*/
+venv/
+env/
+
+# Point Clouds & Massive Spatial Datasets (NavVis bundles, raw scans)
+*.e57
+*.las
+*.laz
+*.ply
+*.pcd
+*.pts
+*.xyz
+*.bundle
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Runtime & Project Job Output Folders
+output/
+logs/
+cache/
+thumbnails/
+temp/
+scratch/
+
+# Local diagnostic / temporary log files
+*.log
+crash.txt
+crash_out.txt
+error.log
+output.log
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
