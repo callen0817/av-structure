@@ -31,3 +31,18 @@ DEFAULT_MAX_SCAN_RANGE = 50.0 # Default max range for hard point exclusion
 VISIBILITY_ENGINE = 'hpr'     # Active visibility engine ('nearest', 'hpr', 'future')
 STATION_PROVIDER = 'PoseCSVProvider' # Active station placement provider
 
+# AV Structure 2.0 — Structured Spherical Grid & Panorama Defaults
+DEFAULT_ANGULAR_RES_DEG = 0.15          # Default spherical grid angular step in degrees (2400 x 1200 grid)
+MIN_ANGULAR_RES_DEG = 0.02              # Finest allowed angular resolution in degrees
+MAX_ANGULAR_RES_DEG = 1.00              # Coarsest allowed angular resolution in degrees
+DEFAULT_GRID_COLLISION_POLICY = "preserve_all"  # 'preserve_all' (lossless) or 'first_hit_cell' (strict 1-pt/cell)
+DEFAULT_PANO_RESOLUTION = (2048, 1024)  # Default equirectangular (width, height)
+SUPPORTED_PANO_RESOLUTIONS = {
+    "2048x1024": (2048, 1024),
+    "4096x2048": (4096, 2048),
+    "8192x4096": (8192, 4096),
+}
+DEFAULT_OPTIMIZATION_PRIORITY = "balanced"  # 'balanced', 'geometry', 'panorama', 'efficiency'
+LARGE_COORDINATE_THRESHOLD = 10_000.0   # Threshold (m) above which local precision frame shifting is used
+
+
