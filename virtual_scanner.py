@@ -16,6 +16,7 @@ from config import (
     DEFAULT_PANO_RESOLUTION,
     SUPPORTED_PANO_RESOLUTIONS,
     DEFAULT_OPTIMIZATION_PRIORITY,
+    DEFAULT_SIMULATION_MODE,
 )
 
 
@@ -133,6 +134,8 @@ def run_pipeline(
     project_name: Optional[str] = None,
     reference_cloud_path: Optional[str] = None,
     json_progress: bool = False,
+    simulation_mode: str = DEFAULT_SIMULATION_MODE,
+    allow_overlap: bool = False,
 ):
     """
     Executes the entire SLAM -> Structured Scan pipeline (Workflow A & Workflow B).
@@ -422,7 +425,13 @@ def run_pipeline(
     simulator = ScannerSimulator()
 
     r_max = max_range if max_range is not None else DEFAULT_MAX_SCAN_RANGE
-    scans = simulator.simulate_scans(pcd, final_stations, max_range=r_max)
+    scans = simulator.simulate_scans(
+        pcd,
+        final_stations,
+        max_range=r_max,
+        simulation_mode=simulation_mode,
+        allow_overlap=allow_overlap,
+    )
 
     # Determine spherical grid angular resolution (configured or auto-estimated)
     eff_angular_res = (
@@ -674,6 +683,8 @@ def run_pipeline(
         return {
             "success": True,
             "virtual_stations": virtual_stations,
+            "scans": scans,
+            "simulation_stats": simulator.last_simulation_stats,
             "validation": e57_validation,
             "manifest": manifest,
             "bundle_manifest": bundle_manifest,
@@ -721,6 +732,12 @@ def main():
     parser.add_argument("--project-name", default=None, help="Project name for bundle manifest")
     parser.add_argument("--reference-cloud", default=None, help="Reference baseline scan cloud/lod0.bin for 4D historical ICP alignment")
     parser.add_argument("--json-progress", action="store_true", help="Emit single-line JSON progress events to stdout")
+    parser.add_argument(
+        "--simulation-mode",
+        choices=["physical", "partition_all"],
+        default=DEFAULT_SIMULATION_MODE,
+        help="Scan simulation mode: 'physical' (strict line-of-sight without x-ray wall penetration) or 'partition_all' (legacy fallback nearest assignment)",
+    )
 
     args = parser.parse_args()
     pano_res_tuple = SUPPORTED_PANO_RESOLUTIONS.get(args.pano_res, DEFAULT_PANO_RESOLUTION)
@@ -750,6 +767,7 @@ def main():
             project_name=args.project_name,
             reference_cloud_path=args.reference_cloud,
             json_progress=args.json_progress,
+            simulation_mode=args.simulation_mode,
         )
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")

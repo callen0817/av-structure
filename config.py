@@ -45,4 +45,13 @@ SUPPORTED_PANO_RESOLUTIONS = {
 DEFAULT_OPTIMIZATION_PRIORITY = "balanced"  # 'balanced', 'geometry', 'panorama', 'efficiency'
 LARGE_COORDINATE_THRESHOLD = 10_000.0   # Threshold (m) above which local precision frame shifting is used
 
+# Realistic Terrestrial LiDAR Simulation & Wall Line-of-Sight Parameters
+DEFAULT_SIMULATION_MODE = "physical"  # 'physical' (strict line-of-sight, room & opening aware) or 'partition_all' (legacy fallback)
+WALL_GRID_RESOLUTION_M = 0.05         # 2D wall slice grid resolution in meters (5cm)
+WALL_CLEARANCE_STATION_M = 0.30       # Clearance radius around scanner tripod head (meters)
+WALL_CLEARANCE_TARGET_M = 0.10        # Clearance distance before target surface point (meters)
+OCCLUSION_TOLERANCE_NEAR_M = 0.08     # Near-surface occlusion tolerance in meters (8cm, strictly thinner than walls)
+OCCLUSION_TOLERANCE_FAR_M = 0.18      # Far-surface occlusion tolerance in meters (18cm)
+ENABLE_NORMAL_BACKFACE_CULLING = True # Discard points facing away from scanner ray (cos > 0.15)
+
 

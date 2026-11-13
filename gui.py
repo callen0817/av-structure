@@ -378,6 +378,7 @@ class VirtualScannerGUI(ctk.CTk):
         self.optimization_priority_var = ctk.StringVar(value="Balanced (Geometry + Panorama)")
         self.pano_res_var = ctk.StringVar(value="2048x1024 (Fast / Preview)")
         self.angular_res_var = ctk.DoubleVar(value=0.15)
+        self.simulation_mode_var = ctk.StringVar(value="Physical Simulation (Room & Wall LOS Aware)")
         self.cancel_event = threading.Event()
         self.input_rows = {}
         self.x = None
@@ -1313,6 +1314,40 @@ class VirtualScannerGUI(ctk.CTk):
         )
         self.pano_res_dropdown.pack(side="right", fill="x", expand=True, padx=(8, 0))
 
+        # LiDAR Simulation Mode Dropdown (Physical Room & Wall LOS vs Legacy Partitioning)
+        self.sim_mode_box = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
+        self.sim_mode_box.pack(fill="x", padx=16, pady=(4, 4))
+        ctk.CTkLabel(
+            self.sim_mode_box,
+            text="LiDAR Simulation Mode",
+            font=ctk.CTkFont(family=FONT_SANS, size=11, weight="bold"),
+            text_color=AV_THEME["white_muted"],
+            width=205,
+            anchor="w",
+        ).pack(side="left")
+
+        self.sim_mode_options = [
+            "Physical Simulation (Room & Wall LOS Aware)",
+            "Legacy Partitioning (Assign All Points)",
+        ]
+        self.sim_mode_dropdown = ctk.CTkOptionMenu(
+            self.sim_mode_box,
+            variable=self.simulation_mode_var,
+            values=self.sim_mode_options,
+            fg_color=COLORS["secondary"],
+            button_color=COLORS["accent_btn_fill"],
+            button_hover_color=COLORS["accent_btn_hover"],
+            dropdown_fg_color=COLORS["card"],
+            dropdown_hover_color=COLORS["accent_surface"],
+            dropdown_text_color=AV_THEME["white_warm"],
+            text_color=AV_THEME["gold_bright"],
+            font=ctk.CTkFont(family=FONT_SANS, size=11, weight="bold"),
+            corner_radius=8,
+            height=30,
+            width=240,
+        )
+        self.sim_mode_dropdown.pack(side="right", fill="x", expand=True, padx=(8, 0))
+
         # Initial visibility based on default workflow option
         self.on_workflow_change()
 
@@ -1965,6 +2000,7 @@ class VirtualScannerGUI(ctk.CTk):
                 optimization_priority=self.get_optimization_priority_code(),
                 cancel_event=self.cancel_event,
                 export_bundle_dir=bundle_dir,
+                simulation_mode="physical" if "Physical" in self.simulation_mode_var.get() else "partition_all",
             )
             succeeded = True
             self.logger.info("PIPELINE COMPLETED SUCCESSFULLY.")

@@ -294,17 +294,29 @@ def run_verification():
 
         # 9. Verification Check F: Flash Anchor Preservation
         print("\n[Check F] Verifying Locked Flash Anchor Preservation...")
-        anchor_found = False
+        anchor_station = None
         for vs in virtual_stations:
             d = np.linalg.norm(np.array(vs.position) - np.array(locked_anchor))
             if d < 0.10:
-                anchor_found = True
+                anchor_station = vs
                 break
-        assert anchor_found, f"Locked flash anchor {locked_anchor} was not preserved in virtual stations!"
+        assert anchor_station is not None, f"Locked flash anchor {locked_anchor} was not preserved in virtual stations!"
         print(f"  ✓ PASSED: Locked flash anchor at {locked_anchor} successfully preserved as a virtual station.")
 
+        # 10. Verification Check G: Room & Solid Wall Line-of-Sight Culling (No X-Ray Vision)
+        print("\n[Check G] Verifying Room & Solid Wall Line-of-Sight Culling (No X-Ray Vision)...")
+        bath_indices = anchor_station.point_indices
+        bath_pts = pts[bath_indices]
+        # Solid dividing wall is at y=0, x in [-4.0, -1.5]. Corridor behind wall: x < -1.5, y > 0.1, z < 2.8
+        corridor_behind_wall = np.sum((bath_pts[:, 1] > 0.1) & (bath_pts[:, 0] < -1.5) & (bath_pts[:, 2] < 2.8))
+        # Upper level points: z > 2.9
+        upper_level_pts = np.sum(bath_pts[:, 2] > 2.9)
+        assert corridor_behind_wall == 0, f"Bathroom virtual scan contains {corridor_behind_wall} corridor points through solid dividing wall!"
+        assert upper_level_pts == 0, f"Bathroom virtual scan contains {upper_level_pts} upper-floor points through solid floor slab!"
+        print(f"  ✓ PASSED: Physical line-of-sight strictly verified (0 points behind solid dividing wall, 0 points through ceiling slab).")
+
         print("\n" + "=" * 70)
-        print("ALL AV STRUCTURE 2.0 INTEROPERABILITY VERIFICATIONS PASSED (6/6)!")
+        print("ALL AV STRUCTURE 2.0 INTEROPERABILITY VERIFICATIONS PASSED (7/7)!")
         print("=" * 70)
         return True
 

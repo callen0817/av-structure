@@ -714,3 +714,63 @@ def test_av_spatial_bundle_v11_interoperability(tmp_path):
         assert "world_bounds" in fl
         assert fl["world_bounds"]["meters_per_pixel"] > 0
 
+
+def test_room_and_solid_obstacle_line_of_sight_simulation(tmp_path):
+    """
+    Verifies that virtual scan stations take rooms and solid obstacles into account:
+    1. A virtual scan station does NOT show data from both sides of a wall (no x-ray vision).
+    2. Openings (doorways) permit legitimate line-of-sight data capture through the opening.
+    3. Multi-level slab barriers prevent cross-floor contamination.
+    4. Diagnostic accounting accurately records wall-blocked ray intersections.
+    """
+    from tools.verify_interoperability_bundle import create_synthetic_2floor_building
+
+    pcd, pts, cols = create_synthetic_2floor_building()
+    cloud_ply = str(tmp_path / "synthetic_multi_room.ply")
+    o3d.io.write_point_cloud(cloud_ply, pcd)
+
+    output_physical_e57 = str(tmp_path / "physical_scans.e57")
+
+    # 1. Test single bathroom station: must see interior and doorway opening, but ZERO points behind solid wall
+    summary_bath = run_pipeline(
+        input_cloud_path=cloud_ply,
+        output_e57_path=output_physical_e57,
+        manual_stations=[(-2.0, -2.5, 1.55)],
+        mode_pref="manual",
+        simulation_mode="physical",
+        return_details=True,
+    )
+    assert summary_bath["success"] is True
+    scans_bath = summary_bath["scans"]
+    bath_pts = pts[scans_bath[0]]
+
+    corridor_behind_wall = np.sum((bath_pts[:, 1] > 0.1) & (bath_pts[:, 0] < -1.5) & (bath_pts[:, 2] < 2.8))
+    corridor_through_door = np.sum((bath_pts[:, 1] > 0.1) & (bath_pts[:, 0] >= -1.5) & (bath_pts[:, 0] <= 0.0) & (bath_pts[:, 2] < 2.8))
+    upper_floor = np.sum(bath_pts[:, 2] > 2.9)
+
+    assert corridor_behind_wall == 0, f"Expected 0 corridor points behind solid wall, found {corridor_behind_wall}"
+    assert corridor_through_door > 0, f"Expected corridor points visible through open doorway, found {corridor_through_door}"
+    assert upper_floor == 0, f"Expected 0 upper floor points in single-room scan, found {upper_floor}"
+    assert summary_bath["simulation_stats"]["wall_blocked_rays"] > 0
+
+    # 2. Test multi-station layout: corridor station + bathroom station
+    output_multi_e57 = str(tmp_path / "multi_room_scans.e57")
+    summary_multi = run_pipeline(
+        input_cloud_path=cloud_ply,
+        output_e57_path=output_multi_e57,
+        manual_stations=[(-2.0, -2.5, 1.55), (0.0, 2.0, 1.55)],
+        mode_pref="manual",
+        simulation_mode="physical",
+        return_details=True,
+    )
+    assert summary_multi["success"] is True
+    scans_multi = summary_multi["scans"]
+    bath_multi_pts = pts[scans_multi[0]]
+    corr_multi_pts = pts[scans_multi[1]]
+
+    # Neither station may see across the solid dividing wall into the other's occluded zone
+    bath_wall_bleed = np.sum((bath_multi_pts[:, 1] > 0.1) & (bath_multi_pts[:, 0] < -1.5) & (bath_multi_pts[:, 2] < 2.8))
+    assert bath_wall_bleed == 0, f"Expected 0 wall bleed in bathroom scan, got {bath_wall_bleed}"
+    assert len(corr_multi_pts) > 0
+    assert len(bath_multi_pts) > 0
+

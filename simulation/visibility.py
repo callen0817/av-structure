@@ -100,9 +100,8 @@ class VisibilityOptimizer:
         from scipy.ndimage import minimum_filter
         import time
 
-        N_AZ, N_EL = 90, 45
+        N_AZ, N_EL = 180, 90
         MAX_VIS_RANGE = 25.0
-        TOLERANCE = 0.60
         n_cand = len(candidates)
 
         # 2. Compute sparse visibility sets and angular completeness scores for each candidate
@@ -137,14 +136,16 @@ class VisibilityOptimizer:
             depth_map = np.full((N_AZ, N_EL), np.inf, dtype=np.float32)
             np.minimum.at(depth_map, (u, v), r_in)
             min_3x3 = minimum_filter(depth_map, size=3, mode=("wrap", "nearest"))
-            close_occ = (min_3x3 < 8.0) & (depth_map > (min_3x3 + 0.8))
+            close_occ = (min_3x3 < 12.0) & (depth_map > (min_3x3 + 0.30))
             depth_map = np.where(close_occ, min_3x3, depth_map)
 
             # Fraction of 360 spherical bins with observed geometry (measures panoramic completeness)
             occupied_bins = int(np.sum(np.isfinite(depth_map)))
             angular_completeness[i] = float(occupied_bins) / float(N_AZ * N_EL)
 
-            vis_mask = r_in <= (depth_map[u, v] + TOLERANCE)
+            # Adaptive tolerance to prevent false through-wall visibility
+            occ_tol = np.clip(0.12 + 0.006 * r_in, 0.12, 0.25)
+            vis_mask = r_in <= (depth_map[u, v] + occ_tol)
             vis_pts_idx = idx_in[vis_mask].astype(np.int32)
             if len(vis_pts_idx) > 0:
                 cand_visible_pts[i] = vis_pts_idx

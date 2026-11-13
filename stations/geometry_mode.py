@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import open3d as o3d
 import logging
@@ -15,6 +16,60 @@ class GeometryStationGenerator:
         self.tripod_height = float(tripod_height)
         self.candidate_confidences: Dict[Tuple[float, float, float], float] = {}
         self.placement_uncertain: bool = False
+
+    @staticmethod
+    def _find_room_center_candidates(
+        band_pts: np.ndarray,
+        storey_z: float,
+        tripod_height: float,
+        min_room_area_m2: float = 2.0,
+        grid_res: float = 0.08,
+    ) -> List[Tuple[float, float, float]]:
+        """
+        Detects enclosed architectural rooms/spaces from free-space connected components
+        and finds their medial centers (points with maximum clearance from walls).
+        """
+        from scipy.ndimage import label, distance_transform_edt, binary_dilation
+
+        if len(band_pts) < 50:
+            return []
+
+        min_x, min_y = float(np.min(band_pts[:, 0])), float(np.min(band_pts[:, 1]))
+        max_x, max_y = float(np.max(band_pts[:, 0])), float(np.max(band_pts[:, 1]))
+
+        w_px = max(10, int(np.ceil((max_x - min_x) / grid_res)) + 1)
+        h_px = max(10, int(np.ceil((max_y - min_y) / grid_res)) + 1)
+
+        wall_mask = (band_pts[:, 2] >= (storey_z - 0.7)) & (band_pts[:, 2] <= (storey_z + 0.7))
+        w_pts = band_pts[wall_mask]
+        if len(w_pts) < 20:
+            return []
+
+        gx = np.clip(np.floor((w_pts[:, 0] - min_x) / grid_res).astype(np.int32), 0, w_px - 1)
+        gy = np.clip(np.floor((w_pts[:, 1] - min_y) / grid_res).astype(np.int32), 0, h_px - 1)
+        wall_grid = np.zeros((h_px, w_px), dtype=bool)
+        wall_grid[gy, gx] = True
+        wall_grid = binary_dilation(wall_grid, iterations=1)
+
+        free_space = ~wall_grid
+        dist_map = distance_transform_edt(free_space) * grid_res
+
+        lbl, n_lbl = label(free_space)
+        min_cells = int(min_room_area_m2 / (grid_res * grid_res))
+
+        room_centers = []
+        for r_id in range(1, n_lbl + 1):
+            r_mask = lbl == r_id
+            if np.sum(r_mask) >= min_cells:
+                r_dist = np.where(r_mask, dist_map, 0.0)
+                max_clr = float(np.max(r_dist))
+                if max_clr >= 0.45:  # At least 45cm clearance from any wall
+                    max_idx = np.unravel_index(np.argmax(r_dist), r_dist.shape)
+                    c_x = min_x + (max_idx[1] + 0.5) * grid_res
+                    c_y = min_y + (max_idx[0] + 0.5) * grid_res
+                    room_centers.append((float(c_x), float(c_y), float(storey_z)))
+
+        return room_centers
 
     @staticmethod
     def _evaluate_station_clearance_and_confidence(
@@ -200,6 +255,20 @@ class GeometryStationGenerator:
                             added_in_cell.append(st_z)
                             key = (round(best_pos[0], 3), round(best_pos[1], 3), round(best_pos[2], 3))
                             self.candidate_confidences[key] = best_conf
+
+                # Room-aware candidate addition: ensure any enclosed room/space has at least one station
+                room_centers = self._find_room_center_candidates(band_pts, b_low + self.tripod_height, self.tripod_height)
+                for rc in room_centers:
+                    if not any(
+                        math.sqrt((rc[0] - c[0]) ** 2 + (rc[1] - c[1]) ** 2) < 2.0
+                        for c in candidates
+                        if abs(rc[2] - c[2]) < 1.5
+                    ):
+                        ok, clr, conf = self._evaluate_station_clearance_and_confidence(band_pts, rc[0], rc[1], rc[2])
+                        if ok:
+                            candidates.append(rc)
+                            key = (round(rc[0], 3), round(rc[1], 3), round(rc[2], 3))
+                            self.candidate_confidences[key] = max(0.60, conf)
 
         # 3. Conservative fallback when free space cannot be established via standard indoor floor-ceiling slabs
         # (e.g., sparse scans, exterior scenes, low-ceiling spaces, or small test fixtures)
