@@ -1671,6 +1671,13 @@ class VirtualScannerGUI(ctk.CTk):
                     self.max_range_var.set(float(data.get("max_range", 50.0)))
                     self.mode_var.set(data.get("station_generation", "auto"))
                     self.import_workflow_var.set(data.get("import_workflow", "Auto-Detect Workflow"))
+                    if "export_bundle" in data:
+                        self.export_bundle_var.set(bool(data.get("export_bundle", True)))
+                    saved_sim_mode = str(data.get("simulation_mode", "physical")).lower()
+                    if saved_sim_mode == "partition_all":
+                        self.simulation_mode_var.set("Legacy Partitioning (Assign All Points)")
+                    else:
+                        self.simulation_mode_var.set("Physical Simulation (Room & Wall LOS Aware)")
 
                     saved_density = float(data.get("scan_density_pct", 100.0))
                     matching_str = f"{int(saved_density)}%"
@@ -1728,6 +1735,8 @@ class VirtualScannerGUI(ctk.CTk):
             "scan_density_pct": self.get_scan_density_pct(),
             "optimization_priority": self.get_optimization_priority_code(),
             "pano_resolution": list(self.get_pano_resolution_tuple()),
+            "simulation_mode": "physical" if "Physical" in self.simulation_mode_var.get() else "partition_all",
+            "export_bundle": bool(self.export_bundle_var.get()),
             "input_cloud": make_relative(self.input_file.get()),
             "pose_csv": make_relative(self.pose_csv.get()),
             "panorama_folder": make_relative(self.panos_dir.get()),
@@ -1747,9 +1756,9 @@ class VirtualScannerGUI(ctk.CTk):
 
     def browse_input(self):
         file = filedialog.askopenfilename(
-            title="Select Point Cloud",
+            title="Select Point Cloud or Session Archive",
             filetypes=(
-                ("Point Cloud files", "*.e57;*.las;*.laz;*.ply;*.pts;*.xyz;*.xyzrgb;*.pcd"),
+                ("Point Cloud & Session Archives", "*.e57;*.las;*.laz;*.ply;*.pts;*.xyz;*.xyzrgb;*.pcd;*.bin;*.zip"),
                 ("All files", "*.*"),
             ),
         )

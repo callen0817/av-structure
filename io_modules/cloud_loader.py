@@ -132,6 +132,7 @@ class CloudLoader:
 
     def _load_archive_or_session(self, root_path: str, is_zip: bool = False):
         import glob
+        import shutil
         import zipfile
         import tempfile
         import json
@@ -140,43 +141,61 @@ class CloudLoader:
         work_dir = root_path
         if is_zip:
             temp_dir = tempfile.mkdtemp(prefix="av_session_")
-            with zipfile.ZipFile(root_path, "r") as zf:
-                zf.extractall(temp_dir)
-            work_dir = temp_dir
+            try:
+                base_real = os.path.realpath(temp_dir)
+                with zipfile.ZipFile(root_path, "r") as zf:
+                    for member in zf.infolist():
+                        target_path = os.path.realpath(os.path.join(temp_dir, member.filename))
+                        if not (target_path == base_real or target_path.startswith(base_real + os.sep)):
+                            raise ValueError(f"Unsafe zip archive entry detected (path traversal): {member.filename}")
+                    zf.extractall(temp_dir)
+                work_dir = temp_dir
+            except Exception:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise
 
-        # Look for point clouds inside work_dir (priority order)
-        cloud_patterns = [
-            "pointcloud_fused_rgb.ply",
-            "cleaned.ply",
-            "pointcloud*.ply",
-            "*.ply",
-            "*.pcd",
-            "*.xyz",
-            "*.xyzrgb",
-            "*.e57",
-            "*.las",
-            "*.laz",
-            "*.pts",
-        ]
-        found_cloud = None
-        for pat in cloud_patterns:
-            matches = glob.glob(os.path.join(work_dir, "**", pat), recursive=True)
-            if matches:
-                # Prefer files not in hidden or temp folders
-                matches = [m for m in matches if "/." not in m]
+        try:
+            # Look for point clouds inside work_dir (priority order)
+            cloud_patterns = [
+                "pointcloud_fused_rgb.ply",
+                "cleaned.ply",
+                "pointcloud*.ply",
+                "*.ply",
+                "*.pcd",
+                "*.xyz",
+                "*.xyzrgb",
+                "*.e57",
+                "*.las",
+                "*.laz",
+                "*.pts",
+            ]
+            found_cloud = None
+            for pat in cloud_patterns:
+                matches = glob.glob(os.path.join(work_dir, "**", pat), recursive=True)
                 if matches:
-                    found_cloud = matches[0]
-                    break
+                    # Prefer files not in hidden or temp folders
+                    matches = [m for m in matches if "/." not in m]
+                    if matches:
+                        found_cloud = matches[0]
+                        break
 
-        if not found_cloud:
-            raise FileNotFoundError(f"No supported 3D point cloud file found inside archive/session directory: {root_path}")
+            if not found_cloud:
+                raise FileNotFoundError(
+                    f"No supported 3D point cloud file found inside archive/session directory: {root_path}"
+                )
 
-        logger.info(f"Discovered primary point cloud inside session: {found_cloud}")
-        inner_loader = CloudLoader(found_cloud)
-        pcd, extra_data = inner_loader.load()
+            logger.info(f"Discovered primary point cloud inside session: {found_cloud}")
+            inner_loader = CloudLoader(found_cloud)
+            pcd, extra_data = inner_loader.load()
+        except Exception:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
 
         extra_data["session_dir"] = work_dir
         extra_data["is_session"] = True
+        if temp_dir:
+            extra_data["_temp_dir"] = temp_dir
 
         # Check for AV Scan / AV ScanAR flash anchors
         anchor_files = glob.glob(os.path.join(work_dir, "**", "flash_anchors.json"), recursive=True)

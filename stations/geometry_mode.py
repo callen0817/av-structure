@@ -24,38 +24,72 @@ class GeometryStationGenerator:
         tripod_height: float,
         min_room_area_m2: float = 2.0,
         grid_res: float = 0.08,
+        max_grid_dim: int = 2048,
     ) -> List[Tuple[float, float, float]]:
         """
         Detects enclosed architectural rooms/spaces from free-space connected components
-        and finds their medial centers (points with maximum clearance from walls).
+        restricted strictly to the building's floor-slab interior footprint, and finds their
+        medial centers (points with maximum clearance from walls).
         """
         from scipy.ndimage import label, distance_transform_edt, binary_dilation
 
         if len(band_pts) < 50:
             return []
 
-        min_x, min_y = float(np.min(band_pts[:, 0])), float(np.min(band_pts[:, 1]))
-        max_x, max_y = float(np.max(band_pts[:, 0])), float(np.max(band_pts[:, 1]))
+        floor_z = float(np.percentile(band_pts[:, 2], 5))
+        ceil_z = float(np.percentile(band_pts[:, 2], 95))
+        if (ceil_z - floor_z) <= 2.0:
+            return []
 
-        w_px = max(10, int(np.ceil((max_x - min_x) / grid_res)) + 1)
-        h_px = max(10, int(np.ceil((max_y - min_y) / grid_res)) + 1)
+        eff_st_z = floor_z + min(float(tripod_height), 0.65 * (ceil_z - floor_z))
 
-        wall_mask = (band_pts[:, 2] >= (storey_z - 0.7)) & (band_pts[:, 2] <= (storey_z + 0.7))
+        if len(band_pts) > 500:
+            min_x, max_x = np.percentile(band_pts[:, 0], [0.1, 99.9])
+            min_y, max_y = np.percentile(band_pts[:, 1], [0.1, 99.9])
+        else:
+            min_x, max_x = float(np.min(band_pts[:, 0])), float(np.max(band_pts[:, 0]))
+            min_y, max_y = float(np.min(band_pts[:, 1])), float(np.max(band_pts[:, 1]))
+
+        span_x = max(1.0, float(max_x - min_x))
+        span_y = max(1.0, float(max_y - min_y))
+        eff_res = float(max(grid_res, max(span_x, span_y) / float(max_grid_dim)))
+
+        w_px = max(10, min(max_grid_dim + 1, int(np.ceil(span_x / eff_res)) + 1))
+        h_px = max(10, min(max_grid_dim + 1, int(np.ceil(span_y / eff_res)) + 1))
+
+        # 1. Floor-slab interior footprint mask (prevents exterior void outside L-shaped buildings)
+        floor_mask_pts = band_pts[(band_pts[:, 2] >= (floor_z - 0.25)) & (band_pts[:, 2] <= (floor_z + 0.35))]
+        if len(floor_mask_pts) < 20:
+            return []
+        fx = np.clip(np.floor((floor_mask_pts[:, 0] - min_x) / eff_res).astype(np.int32), 0, w_px - 1)
+        fy = np.clip(np.floor((floor_mask_pts[:, 1] - min_y) / eff_res).astype(np.int32), 0, h_px - 1)
+        floor_footprint = np.zeros((h_px, w_px), dtype=bool)
+        floor_footprint[fy, fx] = True
+        # Dilate slightly to bridge sparse floor point spacing (~25cm)
+        dilate_iters = max(1, int(round(0.25 / eff_res)))
+        floor_footprint = binary_dilation(floor_footprint, iterations=dilate_iters)
+
+        # 2. Eye-level wall mask
+        wall_mask = (band_pts[:, 2] >= (eff_st_z - 0.7)) & (band_pts[:, 2] <= (eff_st_z + 0.7))
         w_pts = band_pts[wall_mask]
         if len(w_pts) < 20:
             return []
 
-        gx = np.clip(np.floor((w_pts[:, 0] - min_x) / grid_res).astype(np.int32), 0, w_px - 1)
-        gy = np.clip(np.floor((w_pts[:, 1] - min_y) / grid_res).astype(np.int32), 0, h_px - 1)
+        gx = np.clip(np.floor((w_pts[:, 0] - min_x) / eff_res).astype(np.int32), 0, w_px - 1)
+        gy = np.clip(np.floor((w_pts[:, 1] - min_y) / eff_res).astype(np.int32), 0, h_px - 1)
         wall_grid = np.zeros((h_px, w_px), dtype=bool)
         wall_grid[gy, gx] = True
         wall_grid = binary_dilation(wall_grid, iterations=1)
 
-        free_space = ~wall_grid
-        dist_map = distance_transform_edt(free_space) * grid_res
+        # Interior free space MUST lie on the floor footprint and outside walls
+        free_space = floor_footprint & (~wall_grid)
+        if not np.any(free_space):
+            return []
+
+        dist_map = distance_transform_edt(free_space) * eff_res
 
         lbl, n_lbl = label(free_space)
-        min_cells = int(min_room_area_m2 / (grid_res * grid_res))
+        min_cells = max(4, int(min_room_area_m2 / (eff_res * eff_res)))
 
         room_centers = []
         for r_id in range(1, n_lbl + 1):
@@ -63,11 +97,11 @@ class GeometryStationGenerator:
             if np.sum(r_mask) >= min_cells:
                 r_dist = np.where(r_mask, dist_map, 0.0)
                 max_clr = float(np.max(r_dist))
-                if max_clr >= 0.45:  # At least 45cm clearance from any wall
+                if max_clr >= 0.45:  # At least 45cm clearance from any wall or exterior edge
                     max_idx = np.unravel_index(np.argmax(r_dist), r_dist.shape)
-                    c_x = min_x + (max_idx[1] + 0.5) * grid_res
-                    c_y = min_y + (max_idx[0] + 0.5) * grid_res
-                    room_centers.append((float(c_x), float(c_y), float(storey_z)))
+                    c_x = min_x + (max_idx[1] + 0.5) * eff_res
+                    c_y = min_y + (max_idx[0] + 0.5) * eff_res
+                    room_centers.append((float(c_x), float(c_y), float(eff_st_z)))
 
         return room_centers
 
@@ -256,19 +290,27 @@ class GeometryStationGenerator:
                             key = (round(best_pos[0], 3), round(best_pos[1], 3), round(best_pos[2], 3))
                             self.candidate_confidences[key] = best_conf
 
-                # Room-aware candidate addition: ensure any enclosed room/space has at least one station
-                room_centers = self._find_room_center_candidates(band_pts, b_low + self.tripod_height, self.tripod_height)
-                for rc in room_centers:
-                    if not any(
-                        math.sqrt((rc[0] - c[0]) ** 2 + (rc[1] - c[1]) ** 2) < 2.0
-                        for c in candidates
-                        if abs(rc[2] - c[2]) < 1.5
-                    ):
-                        ok, clr, conf = self._evaluate_station_clearance_and_confidence(band_pts, rc[0], rc[1], rc[2])
-                        if ok:
-                            candidates.append(rc)
-                            key = (round(rc[0], 3), round(rc[1], 3), round(rc[2], 3))
-                            self.candidate_confidences[key] = max(0.60, conf)
+        # 2b. Room-aware candidate addition: run once per storey band on the whole floor
+        for b_low, b_high in storey_bands:
+            storey_pts = points[(z_all >= b_low) & (z_all <= b_high)]
+            if len(storey_pts) < 50:
+                continue
+            room_centers = self._find_room_center_candidates(
+                storey_pts, b_low + self.tripod_height, self.tripod_height
+            )
+            for rc in room_centers:
+                if not any(
+                    math.sqrt((rc[0] - c[0]) ** 2 + (rc[1] - c[1]) ** 2) < 2.0
+                    for c in candidates
+                    if abs(rc[2] - c[2]) < 1.5
+                ):
+                    ok, clr, conf = self._evaluate_station_clearance_and_confidence(
+                        storey_pts, rc[0], rc[1], rc[2]
+                    )
+                    if ok:
+                        candidates.append(rc)
+                        key = (round(rc[0], 3), round(rc[1], 3), round(rc[2], 3))
+                        self.candidate_confidences[key] = max(0.60, conf)
 
         # 3. Conservative fallback when free space cannot be established via standard indoor floor-ceiling slabs
         # (e.g., sparse scans, exterior scenes, low-ceiling spaces, or small test fixtures)

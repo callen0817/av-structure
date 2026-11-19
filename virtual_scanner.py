@@ -138,8 +138,91 @@ def run_pipeline(
     allow_overlap: bool = False,
 ):
     """
-    Executes the entire SLAM -> Structured Scan pipeline (Workflow A & Workflow B).
+    Executes the entire SLAM -> Structured Scan pipeline (Workflow A & Workflow B),
+    guaranteeing cleanup of any temporary directories extracted from archive inputs.
     """
+    cleanup_dirs: List[str] = []
+    try:
+        return _run_pipeline_impl(
+            input_cloud_path=input_cloud_path,
+            output_e57_path=output_e57_path,
+            pose_csv_path=pose_csv_path,
+            navvis_images_dir=navvis_images_dir,
+            mode_pref=mode_pref,
+            logger_instance=logger_instance,
+            alignment_file=alignment_file,
+            spacing=spacing,
+            overlap=overlap,
+            coverage=coverage,
+            max_range=max_range,
+            project_dir=project_dir,
+            job_id=job_id,
+            dry_run=dry_run,
+            scan_density_pct=scan_density_pct,
+            optimization_priority=optimization_priority,
+            min_stations=min_stations,
+            max_stations=max_stations,
+            manual_stations=manual_stations,
+            exclude_stations=exclude_stations,
+            angular_res_deg=angular_res_deg,
+            collision_policy=collision_policy,
+            pano_resolution=pano_resolution,
+            include_diagnostic_pano_without_rgb=include_diagnostic_pano_without_rgb,
+            cancel_event=cancel_event,
+            return_details=return_details,
+            export_bundle_dir=export_bundle_dir,
+            scan_date=scan_date,
+            scan_id=scan_id,
+            project_name=project_name,
+            reference_cloud_path=reference_cloud_path,
+            json_progress=json_progress,
+            simulation_mode=simulation_mode,
+            allow_overlap=allow_overlap,
+            _cleanup_dirs=cleanup_dirs,
+        )
+    finally:
+        for td in cleanup_dirs:
+            if td and os.path.exists(td):
+                shutil.rmtree(td, ignore_errors=True)
+
+
+def _run_pipeline_impl(
+    input_cloud_path: str,
+    output_e57_path: str,
+    pose_csv_path: Optional[str] = None,
+    navvis_images_dir: Optional[str] = None,
+    mode_pref: str = "auto",
+    logger_instance=None,
+    alignment_file: Optional[str] = None,
+    spacing: Optional[float] = None,
+    overlap: Optional[float] = None,
+    coverage: Optional[float] = None,
+    max_range: Optional[float] = None,
+    project_dir: Optional[str] = None,
+    job_id: Optional[str] = None,
+    dry_run: bool = False,
+    scan_density_pct: float = 100.0,
+    optimization_priority: str = DEFAULT_OPTIMIZATION_PRIORITY,
+    min_stations: Optional[int] = None,
+    max_stations: Optional[int] = None,
+    manual_stations: Optional[List[tuple]] = None,
+    exclude_stations: Optional[List[tuple]] = None,
+    angular_res_deg: Optional[float] = None,
+    collision_policy: str = DEFAULT_GRID_COLLISION_POLICY,
+    pano_resolution: Optional[Tuple[int, int]] = None,
+    include_diagnostic_pano_without_rgb: bool = True,
+    cancel_event: Optional[Any] = None,
+    return_details: bool = False,
+    export_bundle_dir: Optional[str] = None,
+    scan_date: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    reference_cloud_path: Optional[str] = None,
+    json_progress: bool = False,
+    simulation_mode: str = DEFAULT_SIMULATION_MODE,
+    allow_overlap: bool = False,
+    _cleanup_dirs: Optional[List[str]] = None,
+):
     start_time = time.time()
     if logger_instance is None:
         logger_instance = logging.getLogger(__name__)
@@ -241,6 +324,8 @@ def run_pipeline(
     _check_cancelled(cancel_event, "Stage 1: Loading Data")
     loader = CloudLoader(input_cloud_path)
     pcd, extra_data = loader.load()
+    if _cleanup_dirs is not None and extra_data.get("_temp_dir"):
+        _cleanup_dirs.append(extra_data["_temp_dir"])
 
     if pcd is None or pcd.is_empty() or len(pcd.points) == 0:
         raise ValueError(f"Input point cloud contains 0 valid points: {input_cloud_path}")
@@ -270,6 +355,11 @@ def run_pipeline(
             if fa_t not in manual_stations:
                 manual_stations.append(fa_t)
         logger_instance.info(f"Loaded {len(flash_anchors)} locked user-pinned flash anchors into station generator.")
+
+    # Auto-wire session trajectory.csv (AV Scan / AV ScanAR) if no explicit pose CSV was provided
+    if not pose_csv_path and extra_data.get("trajectory_csv") and mode_pref in ("auto", "trajectory"):
+        pose_csv_path = extra_data["trajectory_csv"]
+        logger_instance.info(f"Using session trajectory CSV discovered inside input: {pose_csv_path}")
 
     pano_poses = None
     candidates = []

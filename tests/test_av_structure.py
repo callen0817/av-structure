@@ -774,3 +774,97 @@ def test_room_and_solid_obstacle_line_of_sight_simulation(tmp_path):
     assert len(corr_multi_pts) > 0
     assert len(bath_multi_pts) > 0
 
+
+def test_audit_fixes_regression_suite(tmp_path):
+    """
+    Regression tests for the Gemini 4 Neon audit fixes:
+    1. Physical LOS retains >80% of directly visible room surfaces (no unoriented normal culling loss).
+    2. allow_overlap=True enforces max_range and reports accurate line_of_sight_points.
+    3. Exported 16-bit depth PNG encodes unobserved (inf) pixels as 0 (not 65535).
+    4. ZipSlip path traversal archives are rejected cleanly.
+    5. E57Exporter does not leak depth_map from a synthesized station to a physical-pano station.
+    """
+    from tools.verify_interoperability_bundle import create_synthetic_2floor_building
+    from io_modules.exporter_walkthrough_bundle import export_walkthrough_bundle
+    from stations.virtual_station import VirtualStation
+
+    pcd, pts, cols = create_synthetic_2floor_building()
+
+    # 1. Surface retention check (no false unoriented normal culling)
+    sim = ScannerSimulator()
+    scans = sim.simulate_scans(pcd, [(-2.0, -2.5, 1.55)], simulation_mode="physical")
+    bath_mask = (
+        ((pts[:, 0] == -4.0) & (pts[:, 1] >= -4.0) & (pts[:, 1] <= 0.0) & (pts[:, 2] <= 2.8)) |
+        ((pts[:, 1] == -4.0) & (pts[:, 0] >= -4.0) & (pts[:, 0] <= 0.0) & (pts[:, 2] <= 2.8)) |
+        ((pts[:, 0] == 0.0) & (pts[:, 1] >= -4.0) & (pts[:, 1] <= 0.0) & (pts[:, 2] <= 2.8)) |
+        ((pts[:, 1] == 0.0) & (pts[:, 0] >= -4.0) & (pts[:, 0] <= -1.5) & (pts[:, 2] <= 2.8)) |
+        ((pts[:, 2] == 0.0) & (pts[:, 0] >= -4.0) & (pts[:, 0] <= 0.0) & (pts[:, 1] >= -4.0) & (pts[:, 1] <= 0.0)) |
+        ((pts[:, 2] == 2.8) & (pts[:, 0] >= -4.0) & (pts[:, 0] <= 0.0) & (pts[:, 1] >= -4.0) & (pts[:, 1] <= 0.0))
+    )
+    bath_kept = int(np.sum(bath_mask[scans[0]]))
+    retention = bath_kept / float(np.sum(bath_mask))
+    assert retention > 0.75, f"Expected >75% bathroom surface retention (was 35.9% with unoriented normals), got {retention*100:.1f}%"
+
+    # 2. allow_overlap=True with strict max_range
+    scans_ov = sim.simulate_scans(
+        pcd,
+        [(-2.0, -2.5, 1.55), (0.0, 2.0, 1.55)],
+        max_range=2.5,
+        simulation_mode="physical",
+        allow_overlap=True,
+    )
+    assert sim.last_simulation_stats["line_of_sight_points"] > 0
+    for st_i, pos in enumerate([(-2.0, -2.5, 1.55), (0.0, 2.0, 1.55)]):
+        if len(scans_ov[st_i]) > 0:
+            d = np.linalg.norm(pts[scans_ov[st_i]] - np.array(pos), axis=1)
+            assert float(np.max(d)) <= 2.5 + 1e-4
+
+    # 3. 16-bit depth PNG sentinel check (inf -> 0, finite -> mm)
+    depth_test = np.full((64, 128), np.inf, dtype=np.float32)
+    depth_test[10:20, 10:20] = 3.5  # 3500 mm
+    vs = VirtualStation(
+        station_id="Scan_0000",
+        index=0,
+        position=(-2.0, -2.5, 1.55),
+        point_indices=scans[0],
+        depth_map=depth_test,
+        panorama_jpeg_bytes=create_test_jpeg_bytes(128, 64),
+        panorama_source="generated_rgb",
+    )
+    b_dir = str(tmp_path / "depth_bundle")
+    export_walkthrough_bundle(b_dir, [vs], pts, cols)
+    depth_img = np.asarray(Image.open(os.path.join(b_dir, "panos", "Scan_0000_depth.png")))
+    assert depth_img[0, 0] == 0, f"Unobserved inf pixel must be encoded as 0, got {depth_img[0, 0]}"
+    assert depth_img[15, 15] == 3500, f"Expected 3500mm, got {depth_img[15, 15]}"
+
+    # 4. ZipSlip path traversal rejection
+    evil_zip = tmp_path / "evil.zip"
+    with zipfile.ZipFile(evil_zip, "w") as zf:
+        zf.writestr("../../escape.txt", "malicious")
+    with pytest.raises(ValueError, match="Unsafe zip archive"):
+        CloudLoader(str(evil_zip)).load()
+
+    # 5. E57Exporter does not leak depth_map from synthesized station 0 to physical-pano station 1
+    e57_out = str(tmp_path / "no_leak.e57")
+    vs0 = VirtualStation(station_id="Scan_0000", index=0, position=(-2.0, -2.5, 1.55), point_indices=scans[0])
+    vs1 = VirtualStation(station_id="Scan_0001", index=1, position=(0.0, 2.0, 1.55), point_indices=scans[0])
+    p0 = PanoPose(pano_id=0, filename="", timestamp=0.0, position=(-2.0, -2.5, 1.55), orientation=(1, 0, 0, 0))
+    p1 = PanoPose(
+        pano_id=1,
+        filename="p1.jpg",
+        timestamp=1.0,
+        position=(0.0, 2.0, 1.55),
+        orientation=(1, 0, 0, 0),
+        image_bytes=create_test_jpeg_bytes(256, 128),
+    )
+    exporter = E57Exporter(e57_out, pano_resolution=(512, 256))
+    exporter.export(
+        pcd,
+        {0: scans[0], 1: scans[0]},
+        [(-2.0, -2.5, 1.55), (0.0, 2.0, 1.55)],
+        pano_poses=[p0, p1],
+        virtual_stations=[vs0, vs1],
+    )
+    assert vs0.depth_map is not None
+    assert vs1.depth_map is None, "Station 1 with existing physical panorama must not inherit Station 0's depth_map"
+

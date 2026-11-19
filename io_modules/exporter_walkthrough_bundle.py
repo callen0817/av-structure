@@ -166,23 +166,37 @@ def build_navigation_graph(
 
     if len(points) > 0:
         pts_np = np.asarray(points, dtype=np.float32)
-        min_x, min_y = float(np.min(pts_np[:, 0])), float(np.min(pts_np[:, 1]))
-        max_x, max_y = float(np.max(pts_np[:, 0])), float(np.max(pts_np[:, 1]))
-        w_px = max(10, int(np.ceil((max_x - min_x) / voxel_size)) + 1)
-        h_px = max(10, int(np.ceil((max_y - min_y) / voxel_size)) + 1)
+        if len(pts_np) > 1000:
+            min_x, max_x = np.percentile(pts_np[:, 0], [0.1, 99.9])
+            min_y, max_y = np.percentile(pts_np[:, 1], [0.1, 99.9])
+        else:
+            min_x, max_x = float(np.min(pts_np[:, 0])), float(np.max(pts_np[:, 0]))
+            min_y, max_y = float(np.min(pts_np[:, 1])), float(np.max(pts_np[:, 1]))
+        st_xy = np.array([[float(s.position[0]), float(s.position[1])] for s in stations], dtype=np.float64)
+        min_x = float(min(min_x, np.min(st_xy[:, 0]) - 1.0))
+        max_x = float(max(max_x, np.max(st_xy[:, 0]) + 1.0))
+        min_y = float(min(min_y, np.min(st_xy[:, 1]) - 1.0))
+        max_y = float(max(max_y, np.max(st_xy[:, 1]) + 1.0))
+
+        max_grid_dim = 4096
+        span_x = max(1.0, max_x - min_x)
+        span_y = max(1.0, max_y - min_y)
+        eff_voxel = float(max(voxel_size, max(span_x, span_y) / float(max_grid_dim)))
+        w_px = max(10, min(max_grid_dim + 1, int(np.ceil(span_x / eff_voxel)) + 1))
+        h_px = max(10, min(max_grid_dim + 1, int(np.ceil(span_y / eff_voxel)) + 1))
 
         for fid in unique_floors:
             # Stations on this floor
             st_z_vals = [float(stations[i].position[2]) for i in range(n_stations) if station_floor_map.get(i, 1) == fid]
             mid_z = float(np.median(st_z_vals)) if st_z_vals else 1.5
-            # Wall band at eye/chest level [-0.4m, +0.4m] relative to station height
+            # Wall band at eye/chest level [-0.5m, +0.5m] relative to station height
             band_mask = (pts_np[:, 2] >= (mid_z - 0.5)) & (pts_np[:, 2] <= (mid_z + 0.5))
             band_pts = pts_np[band_mask]
 
             grid = np.zeros((h_px, w_px), dtype=bool)
             if len(band_pts) > 0:
-                gx = np.clip(np.floor((band_pts[:, 0] - min_x) / voxel_size).astype(np.int32), 0, w_px - 1)
-                gy = np.clip(np.floor((band_pts[:, 1] - min_y) / voxel_size).astype(np.int32), 0, h_px - 1)
+                gx = np.clip(np.floor((band_pts[:, 0] - min_x) / eff_voxel).astype(np.int32), 0, w_px - 1)
+                gy = np.clip(np.floor((band_pts[:, 1] - min_y) / eff_voxel).astype(np.int32), 0, h_px - 1)
                 # Count density to avoid isolated noise voxels
                 cell_idx = gy * w_px + gx
                 counts = np.bincount(cell_idx, minlength=h_px * w_px)
@@ -195,7 +209,7 @@ def build_navigation_graph(
                 "grid": grid,
                 "origin_x": min_x,
                 "origin_y": min_y,
-                "res": voxel_size,
+                "res": eff_voxel,
             }
 
     # Adjacency set of (idx_a, idx_b)
@@ -345,10 +359,15 @@ def generate_floor_keyplan(
     if existing_image_path and os.path.exists(existing_image_path):
         try:
             img = Image.open(existing_image_path).convert("RGB")
-            # Calculate world bounds from points on this floor
+            # Calculate world bounds from points belonging to this floor's vertical slice
             pts_np = np.asarray(points, dtype=np.float64)
-            min_x, max_x = float(np.min(pts_np[:, 0])), float(np.max(pts_np[:, 0]))
-            min_y, max_y = float(np.min(pts_np[:, 1])), float(np.max(pts_np[:, 1]))
+            if len(pts_np) > 0:
+                floor_slice = pts_np[(pts_np[:, 2] >= (slab_z - 0.25)) & (pts_np[:, 2] <= (slab_z + 2.50))]
+                active_floor_pts = floor_slice if len(floor_slice) > 20 else pts_np
+                min_x, max_x = float(np.min(active_floor_pts[:, 0])), float(np.max(active_floor_pts[:, 0]))
+                min_y, max_y = float(np.min(active_floor_pts[:, 1])), float(np.max(active_floor_pts[:, 1]))
+            else:
+                min_x, max_x, min_y, max_y = -10.0, 10.0, -10.0, 10.0
             w, h = img.size
             mpp = max((max_x - min_x) / max(1, w), (max_y - min_y) / max(1, h))
             return img, {
@@ -588,10 +607,14 @@ def export_walkthrough_bundle(
             # Fallback black panorama
             Image.new("RGB", (2048, 1024), (0, 0, 0)).save(pano_abs_path, format="JPEG", quality=90)
 
-        # Write 16-bit millimeter depth map if depth_map is available
+        # Write 16-bit millimeter depth map if depth_map is available (0 = unobserved/invalid)
         has_depth_file = False
         if st.depth_map is not None:
-            depth_mm = np.clip(st.depth_map * 1000.0, 0, 65535).astype(np.uint16)
+            d_raw = np.asarray(st.depth_map, dtype=np.float32)
+            valid_d = np.isfinite(d_raw) & (d_raw > 0.0)
+            depth_mm = np.zeros(d_raw.shape, dtype=np.uint16)
+            if np.any(valid_d):
+                depth_mm[valid_d] = np.clip(np.round(d_raw[valid_d] * 1000.0), 1, 65535).astype(np.uint16)
             Image.fromarray(depth_mm).save(depth_abs_path)
             has_depth_file = True
 

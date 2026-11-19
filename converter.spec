@@ -23,9 +23,11 @@ a = Analysis(
     datas=datas_o3d + [
         ('config.py', '.'),
         ('virtual_scanner.py', '.'),
+        ('assets', 'assets'),
         ('io_modules', 'io_modules'),
         ('simulation', 'simulation'),
         ('stations', 'stations'),
+        ('tools', 'tools'),
     ],
     hiddenimports=hiddenimports_o3d + [
         'customtkinter',

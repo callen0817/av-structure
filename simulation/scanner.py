@@ -219,23 +219,38 @@ class ScannerSimulator:
         points: np.ndarray,
         stations: List[tuple],
         voxel_size: float = WALL_GRID_RESOLUTION_M,
+        max_grid_dim: int = 4096,
     ) -> Dict[int, Dict[str, Any]]:
         """
         Builds 2D architectural wall occupancy grids per floor level at eye/scanner level.
         Detects solid walls and structures while leaving doorways, hallways, and portals open.
+        Caps grid resolution dynamically on large sites to prevent unbounded memory allocation.
         """
         from scipy.ndimage import binary_dilation
 
         if len(points) == 0 or not stations:
             return {}
 
-        min_x = float(np.min(points[:, 0]))
-        min_y = float(np.min(points[:, 1]))
-        max_x = float(np.max(points[:, 0]))
-        max_y = float(np.max(points[:, 1]))
+        # Use robust bounds (0.1% - 99.9% percentiles expanded to include all stations) to resist far outliers
+        if len(points) > 1000:
+            min_x, max_x = np.percentile(points[:, 0], [0.1, 99.9])
+            min_y, max_y = np.percentile(points[:, 1], [0.1, 99.9])
+        else:
+            min_x, max_x = float(np.min(points[:, 0])), float(np.max(points[:, 0]))
+            min_y, max_y = float(np.min(points[:, 1])), float(np.max(points[:, 1]))
 
-        w_px = max(10, int(np.ceil((max_x - min_x) / voxel_size)) + 1)
-        h_px = max(10, int(np.ceil((max_y - min_y) / voxel_size)) + 1)
+        st_arr = np.asarray(stations, dtype=np.float64)
+        min_x = float(min(min_x, np.min(st_arr[:, 0]) - 1.0))
+        max_x = float(max(max_x, np.max(st_arr[:, 0]) + 1.0))
+        min_y = float(min(min_y, np.min(st_arr[:, 1]) - 1.0))
+        max_y = float(max(max_y, np.max(st_arr[:, 1]) + 1.0))
+
+        span_x = max(1.0, max_x - min_x)
+        span_y = max(1.0, max_y - min_y)
+        eff_voxel = float(max(voxel_size, max(span_x, span_y) / float(max_grid_dim)))
+
+        w_px = max(10, min(max_grid_dim + 1, int(np.ceil(span_x / eff_voxel)) + 1))
+        h_px = max(10, min(max_grid_dim + 1, int(np.ceil(span_y / eff_voxel)) + 1))
 
         # Cluster stations into elevation floors separated by >= 2.0m
         z_stations = [float(s[2]) for s in stations]
@@ -253,14 +268,14 @@ class ScannerSimulator:
             grid = np.zeros((h_px, w_px), dtype=bool)
 
             if len(band_pts) > 0:
-                gx = np.clip(np.floor((band_pts[:, 0] - min_x) / voxel_size).astype(np.int32), 0, w_px - 1)
-                gy = np.clip(np.floor((band_pts[:, 1] - min_y) / voxel_size).astype(np.int32), 0, h_px - 1)
+                gx = np.clip(np.floor((band_pts[:, 0] - min_x) / eff_voxel).astype(np.int32), 0, w_px - 1)
+                gy = np.clip(np.floor((band_pts[:, 1] - min_y) / eff_voxel).astype(np.int32), 0, h_px - 1)
                 cell_idx = gy * w_px + gx
                 counts = np.bincount(cell_idx, minlength=h_px * w_px)
-                # Require at least 2 points per 5cm cell to ignore isolated airborne noise
+                # Require at least 2 points per cell to ignore isolated airborne noise
                 solid_mask = counts >= 2
                 grid.flat[solid_mask] = True
-                # Dilate slightly so 10-15cm walls form a solid barrier without holes
+                # Dilate slightly so thin walls form a solid barrier without holes
                 grid = binary_dilation(grid, iterations=1)
 
             floor_grids[f_idx] = {
@@ -268,7 +283,7 @@ class ScannerSimulator:
                 "ref_z": f_z,
                 "origin_x": min_x,
                 "origin_y": min_y,
-                "res": voxel_size,
+                "res": eff_voxel,
                 "w": w_px,
                 "h": h_px,
             }
@@ -396,16 +411,10 @@ class ScannerSimulator:
             f"(mode='{simulation_mode}', num_points={num_points:,})..."
         )
 
-        # Estimate surface normals if not present for realistic back-face culling
-        has_normals = pcd.has_normals()
-        if not has_normals and ENABLE_NORMAL_BACKFACE_CULLING and num_points <= 2_000_000:
-            try:
-                pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.25, max_nn=20))
-                has_normals = pcd.has_normals()
-            except Exception as norm_err:
-                logger.warning(f"Normal estimation skipped: {norm_err}")
-                has_normals = False
-
+        # Only apply surface normal back-face culling when the input cloud already supplies
+        # trusted oriented normals (e.g., from sensor or mesh). Unoriented PCA normals from
+        # estimate_normals() have arbitrary +/- sign and would randomly discard ~50% of valid surfaces.
+        has_normals = bool(pcd.has_normals() and ENABLE_NORMAL_BACKFACE_CULLING)
         normals = np.asarray(pcd.normals, dtype=np.float32) if has_normals else None
 
         # Build 2D architectural wall slices for each building floor
@@ -441,12 +450,13 @@ class ScannerSimulator:
         best_absolute_score = np.full(num_points, np.inf, dtype=np.float32)
         best_raw_dist_sq = np.full(num_points, np.inf, dtype=np.float32)
 
+        max_range_sq = float(max_range ** 2) if max_range is not None else np.inf
         max_search_dist_sq = (float(max_range) + 5.0) ** 2 if max_range is not None else np.inf
 
         # For overlapping physical scans
         station_visible_indices: Dict[int, List[np.ndarray]] = {idx: [] for idx in range(num_stations)}
+        overlap_any_visible = np.zeros(num_points, dtype=bool) if allow_overlap else None
         wall_blocked_total = 0
-        doorway_transmitted_total = 0
         backface_culled_total = 0
 
         for idx, pos in enumerate(stations):
@@ -500,9 +510,9 @@ class ScannerSimulator:
                 # 2. Check candidates within plausible range and same storey band
                 vis_slice = best_visible_score[start_idx:end_idx]
                 if allow_overlap:
-                    candidate_mask = (abs_dz <= 2.2) & (raw_d2 <= max_search_dist_sq)
+                    candidate_mask = (abs_dz <= 2.2) & (raw_d2 <= max_range_sq)
                 else:
-                    candidate_mask = (eff_score < vis_slice) & (abs_dz <= 2.2) & (raw_d2 <= max_search_dist_sq)
+                    candidate_mask = (eff_score < vis_slice) & (abs_dz <= 2.2) & (raw_d2 <= max_range_sq)
 
                 if not np.any(candidate_mask):
                     continue
@@ -519,6 +529,7 @@ class ScannerSimulator:
                 depth_vis_sub = sub_idx[depth_vis]
                 if len(depth_vis_sub) == 0:
                     continue
+                r_depth_vis = r_sub[depth_vis]
 
                 # 2D wall line-of-sight test: prevents rays from penetrating solid dividing walls
                 sub_pts = chunk[depth_vis_sub]
@@ -531,14 +542,15 @@ class ScannerSimulator:
                 )
                 wall_blocked_total += int(np.sum(wall_blocked))
 
-                passed_wall_sub = depth_vis_sub[~wall_blocked]
+                not_blocked = ~wall_blocked
+                passed_wall_sub = depth_vis_sub[not_blocked]
                 if len(passed_wall_sub) == 0:
                     continue
 
-                # Surface normal back-face check (reject surfaces facing away from scanner by > 81 deg)
-                if normals is not None and ENABLE_NORMAL_BACKFACE_CULLING:
+                # Surface normal back-face check (only when trusted oriented normals were provided)
+                if normals is not None:
                     c_norm = normals[start_idx:end_idx][passed_wall_sub]
-                    r_p = r_sub[np.isin(sub_idx, passed_wall_sub)]
+                    r_p = r_depth_vis[not_blocked]
                     dot_n = (
                         dx[passed_wall_sub] * c_norm[:, 0]
                         + dy[passed_wall_sub] * c_norm[:, 1]
@@ -555,15 +567,38 @@ class ScannerSimulator:
                     if allow_overlap:
                         global_sub = start_idx + winning_sub
                         station_visible_indices[idx].append(global_sub)
+                        overlap_any_visible[global_sub] = True
                     else:
                         vis_slice[winning_sub] = eff_score[winning_sub]
                         best_visible_station[start_idx:end_idx][winning_sub] = idx
                         best_raw_dist_sq[start_idx:end_idx][winning_sub] = raw_d2[winning_sub]
 
-        # Resolve assignments based on simulation_mode
-        no_vis = best_visible_station == -1
-        vis_assigned_count = int(np.sum(~no_vis))
-        unassigned_count = int(np.sum(no_vis))
+        # Resolve assignments based on simulation_mode and allow_overlap
+        if allow_overlap:
+            vis_assigned_count = int(np.sum(overlap_any_visible))
+            unassigned_count = int(num_points - vis_assigned_count)
+            final_station_assignment = np.full(num_points, -1, dtype=np.int32)
+            rejected_pts = int(np.sum((~overlap_any_visible) & (best_raw_dist_sq > max_range_sq))) if max_range is not None else 0
+        else:
+            no_vis = best_visible_station == -1
+            vis_assigned_count = int(np.sum(~no_vis))
+            unassigned_count = int(np.sum(no_vis))
+
+            if simulation_mode == "physical":
+                # Strict terrestrial LiDAR reality: unobserved points behind solid walls are NEVER assigned
+                final_station_assignment = np.copy(best_visible_station)
+            else:
+                # Legacy fallback partitioning: assign all points to nearest station
+                final_station_assignment = np.where(no_vis, best_absolute_station, best_visible_station)
+                logger.info(f"Legacy Partitioning: assigned {unassigned_count:,} occluded points via nearest fallback.")
+
+            # Apply max scan range cutoff
+            rejected_pts = 0
+            if max_range is not None:
+                out_of_range = best_raw_dist_sq > max_range_sq
+                final_station_assignment[out_of_range] = -1
+                rejected_pts = int(np.sum(out_of_range))
+                logger.info(f"Max range filter ({max_range}m) excluded {rejected_pts:,} points.")
 
         logger.info(
             f"Physical Line-of-Sight Engine: {vis_assigned_count:,} points ({vis_assigned_count/max(1, num_points)*100:.1f}%) "
@@ -571,23 +606,6 @@ class ScannerSimulator:
             f"Blocked by solid dividing walls: {wall_blocked_total:,} ray intersections; "
             f"Back-face culled: {backface_culled_total:,} points."
         )
-
-        if simulation_mode == "physical":
-            # Strict terrestrial LiDAR reality: unobserved points behind solid walls are NEVER assigned
-            final_station_assignment = np.copy(best_visible_station)
-        else:
-            # Legacy fallback partitioning: assign all points to nearest station
-            final_station_assignment = np.where(no_vis, best_absolute_station, best_visible_station)
-            logger.info(f"Legacy Partitioning: assigned {unassigned_count:,} occluded points via nearest fallback.")
-
-        # Apply max scan range cutoff
-        rejected_pts = 0
-        if max_range is not None:
-            max_range_sq = float(max_range ** 2)
-            out_of_range = best_raw_dist_sq > max_range_sq
-            final_station_assignment[out_of_range] = -1
-            rejected_pts = int(np.sum(out_of_range))
-            logger.info(f"Max range filter ({max_range}m) excluded {rejected_pts:,} points.")
 
         self.last_simulation_stats = {
             "total_input_points": int(num_points),
@@ -603,8 +621,11 @@ class ScannerSimulator:
         # Build scan point index map
         scans = {}
         for idx in range(num_stations):
-            if allow_overlap and len(station_visible_indices[idx]) > 0:
-                station_pts = np.unique(np.concatenate(station_visible_indices[idx]))
+            if allow_overlap:
+                if len(station_visible_indices[idx]) > 0:
+                    station_pts = np.unique(np.concatenate(station_visible_indices[idx]))
+                else:
+                    station_pts = np.empty(0, dtype=np.int64)
             else:
                 station_mask = final_station_assignment == idx
                 station_pts = np.where(station_mask)[0]

@@ -92,6 +92,10 @@ class E57Exporter:
             cam_q = pose_dict.get("rotation") or kf.get("rotation") or [1.0, 0.0, 0.0, 0.0]
 
             cam_pos = np.array(cam_t, dtype=np.float64)
+            # Skip keyframes captured too far from this virtual station (different room / excessive parallax)
+            if float(np.linalg.norm(cam_pos - st_pos)) > 15.0:
+                continue
+
             if len(cam_q) == 4:
                 q_cam = Quaternion(cam_q)
             else:
@@ -112,7 +116,7 @@ class E57Exporter:
                     p_cam = np.dot(p_world - cam_pos, q_cam.rotation_matrix)
                     z_c = p_cam[:, 2]
 
-                    in_front = z_c > 0.20
+                    in_front = (z_c > 0.20) & (z_c <= 35.0)
                     if not np.any(in_front):
                         continue
 
@@ -127,6 +131,19 @@ class E57Exporter:
                     idx_inside = idx_f[inside]
                     u_in = u[inside]
                     v_in = v[inside]
+                    z_in = z_c[idx_inside]
+
+                    # Per-keyframe camera Z-buffer with occlusion_tol so occluded surfaces
+                    # behind closer geometry in the keyframe view cannot steal foreground RGB
+                    cam_zbuf = np.full((h_img, w_img), np.inf, dtype=np.float32)
+                    np.minimum.at(cam_zbuf, (v_in, u_in), z_in.astype(np.float32))
+                    vis_in_kf = z_in <= (cam_zbuf[v_in, u_in] + float(occlusion_tol))
+                    if not np.any(vis_in_kf):
+                        continue
+
+                    idx_inside = idx_inside[vis_in_kf]
+                    u_in = u_in[vis_in_kf]
+                    v_in = v_in[vis_in_kf]
 
                     d_cam = np.linalg.norm(p_cam[idx_inside], axis=1)
                     cosines = (p_cam[idx_inside, 2] / np.maximum(d_cam, 1e-6)).astype(np.float32)
@@ -367,7 +384,14 @@ class E57Exporter:
 
             fill_mask = empty_mask & (dists_inner <= max_fill_px) & np.isfinite(near_depth)
 
-            # Prevent bleeding across depth discontinuities: verify adjacent finite depth doesn't jump > 0.35m
+            # Prevent bleeding across depth discontinuities: reject fill pixels where local finite depth jumps > 0.35m
+            from scipy.ndimage import maximum_filter
+            d_min_3 = minimum_filter(depth_padded, size=3, mode="nearest")
+            d_max_3 = maximum_filter(np.where(np.isfinite(depth_padded), depth_padded, -np.inf), size=3, mode="nearest")
+            local_jump = np.isfinite(d_min_3) & np.isfinite(d_max_3) & ((d_max_3 - d_min_3) > 0.35)
+            jump_inner = local_jump[:, pad_w : pad_w + width]
+            fill_mask = fill_mask & (~jump_inner)
+
             canvas[fill_mask] = canvas_padded[nr_inner[fill_mask], nc_inner[fill_mask]]
             depth_buf[fill_mask] = near_depth[fill_mask]
             coverage_mask[fill_mask] = 1  # 1 = conservatively interpolated pixel
@@ -640,6 +664,7 @@ class E57Exporter:
                 pano_source = "none"
                 pano_metrics = {}
                 coverage_mask = None
+                render_res = None
 
                 if scan_pose is not None:
                     if scan_pose.image_path and os.path.exists(scan_pose.image_path):
